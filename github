@@ -1,0 +1,882 @@
+import streamlit as st
+import psycopg2
+import os
+import pandas as pd
+from datetime import datetime, timedelta
+import plotly.express as px
+import plotly.graph_objects as go
+
+# Configuration de la page
+st.set_page_config(
+    page_title="Veille David Lisnard",
+    page_icon="📊",
+    layout="wide"
+)
+
+# Connexion à la base de données
+@st.cache_resource
+def get_db_connection():
+    """Connexion à PostgreSQL sur Render"""
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        # Render fournit l'URL complète
+        return psycopg2.connect(database_url)
+    else:
+        # Fallback pour développement local
+        return None
+
+# CSS personnalisé
+st.markdown("""
+<style>
+    .main {background-color: #f9fafb;}
+    h1 {color: #1e3a8a; font-weight: 700;}
+    .stMetric {background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);}
+</style>
+""", unsafe_allow_html=True)
+
+# Header
+st.title("📊 Plateforme de Veille Stratégique")
+st.subheader("David Lisnard - Analyse en Temps Réel")
+st.markdown(f"**Dernière mise à jour:** {datetime.now().strftime('%d/%m/%Y à %H:%M')}")
+
+# Connexion DB
+conn = get_db_connection()
+
+if conn is None:
+    st.warning("⚠️ Mode démonstration - Connectez la base de données PostgreSQL")
+
+    # Données de démonstration
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("📈 Mentions", "1,247", "+23%")
+    with col2:
+        st.metric("😊 Sentiment", "+0.42", "+0.08")
+    with col3:
+        st.metric("💬 Engagement", "287", "+15%")
+    with col4:
+        st.metric("👥 Influenceurs", "156", "+8")
+
+    st.info("💡 Pour activer les vraies données, configurez DATABASE_URL dans les variables d'environnement Render")
+
+else:
+    try:
+        cursor = conn.cursor()
+
+        # Requête : Statistiques globales
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total,
+                COUNT(DISTINCT author_username) as unique_authors,
+                AVG(CASE 
+                    WHEN sentiment = 'positive' THEN 1.0
+                    WHEN sentiment = 'neutral' THEN 0.0
+                    WHEN sentiment = 'negative' THEN -1.0
+                END) as avg_sentiment,
+                AVG(like_count + retweet_count) as avg_engagement
+            FROM tweets
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+        """)
+        stats = cursor.fetchone()
+
+        # Affichage des métriques
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("📈 Mentions (7j)", f"{stats[0]:,}" if stats[0] else "0")
+        with col2:
+            st.metric("😊 Sentiment", f"{stats[2]:.2f}" if stats[2] else "0.00")
+        with col3:
+            st.metric("💬 Engagement Moy", f"{int(stats[3])}" if stats[3] else "0")
+        with col4:
+            st.metric("👥 Auteurs Uniques", f"{stats[1]}" if stats[1] else "0")
+
+        st.markdown("---")
+
+        # Graphiques
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            st.subheader("📊 Évolution Temporelle")
+
+            cursor.execute("""
+                SELECT DATE(created_at) as date, COUNT(*) as count
+                FROM tweets
+                WHERE created_at >= NOW() - INTERVAL '7 days'
+                GROUP BY DATE(created_at)
+                ORDER BY date
+            """)
+            timeline_data = cursor.fetchall()
+
+            if timeline_data:
+                df_timeline = pd.DataFrame(timeline_data, columns=['Date', 'Mentions'])
+                fig_timeline = px.line(df_timeline, x='Date', y='Mentions', 
+                                      markers=True, line_shape='spline')
+                fig_timeline.update_layout(height=350)
+                st.plotly_chart(fig_timeline, use_container_width=True)
+            else:
+                st.info("Aucune donnée disponible")
+
+        with col_right:
+            st.subheader("😊 Répartition des Sentiments")
+
+            cursor.execute("""
+                SELECT sentiment, COUNT(*) as count
+                FROM tweets
+                WHERE sentiment IS NOT NULL
+                GROUP BY sentiment
+            """)
+            sentiment_data = cursor.fetchall()
+
+            if sentiment_data:
+                df_sentiment = pd.DataFrame(sentiment_data, columns=['Sentiment', 'Count'])
+                fig_sentiment = px.pie(df_sentiment, values='Count', names='Sentiment',
+                                      color='Sentiment',
+                                      color_discrete_map={
+                                          'positive': '#10B981',
+                                          'neutral': '#6B7280',
+                                          'negative': '#EF4444'
+                                      })
+                fig_sentiment.update_layout(height=350)
+                st.plotly_chart(fig_sentiment, use_container_width=True)
+            else:
+                st.info("Aucune donnée de sentiment disponible")
+
+        st.markdown("---")
+
+        # Top Influenceurs
+        st.subheader("🌟 Top Influenceurs")
+
+        cursor.execute("""
+            SELECT 
+                author_username,
+                COUNT(*) as mentions,
+                AVG(like_count + retweet_count) as avg_engagement,
+                MAX(author_followers) as followers
+            FROM tweets
+            WHERE author_username IS NOT NULL
+            GROUP BY author_username
+            ORDER BY mentions DESC, avg_engagement DESC
+            LIMIT 10
+        """)
+
+        influencers = cursor.fetchall()
+
+        if influencers:
+            df_influencers = pd.DataFrame(influencers, 
+                                         columns=['Compte', 'Mentions', 'Engagement Moy', 'Followers'])
+            st.dataframe(df_influencers, use_container_width=True, hide_index=True)
+        else:
+            st.info("Aucun influenceur détecté")
+
+        cursor.close()
+
+    except Exception as e:
+        st.error(f"Erreur base de données: {e}")
+        st.info("La base de données est peut-être vide. Lancez d'abord le script de collecte.")
+
+# Footer
+st.markdown("---")
+st.markdown("**© 2025 Veille Stratégique David Lisnard** | Propulsé par Streamlit & PostgreSQL")
+
+# 🚀 GUIDE DE DÉPLOIEMENT RENDER - ÉTAPE PAR ÉTAPE
+
+## ✅ ÉTAPE 1 : Créer la Base de Données PostgreSQL
+
+1. Sur dashboard.render.com, cliquez **"New +"** en haut à droite
+2. Sélectionnez **"PostgreSQL"**
+3. Configurez:
+   - Name: `veille-lisnard-db`
+   - Database: `veille_lisnard`  
+   - User: `veille_app`
+   - Region: **Frankfurt** (Europe)
+   - PostgreSQL Version: 15
+   - Plan: **Free** (pour commencer)
+4. Cliquez **"Create Database"**
+5. **Attendez 2-3 minutes** que la DB soit créée
+
+## ✅ ÉTAPE 2 : Initialiser les Tables
+
+1. Une fois la DB créée, allez dans l'onglet **"Connect"**
+2. Copiez la **"Internal Database URL"**
+3. Cliquez sur **"Web Shell"** (ou utilisez psql localement)
+4. Exécutez le script `init_db_render.sql`:
+
+```bash
+# Dans le Web Shell Render
+psql $DATABASE_URL < init_db_render.sql
+```
+
+OU copiez/collez le contenu du fichier directement dans le shell.
+
+## ✅ ÉTAPE 3 : Déployer le Dashboard Streamlit
+
+### Option A: Via GitHub (Recommandé)
+
+1. Créez un repo GitHub avec ces fichiers:
+   - dashboard_streamlit.py
+   - requirements_render.txt (renommez en requirements.txt)
+   - init_db_render.sql
+
+2. Sur Render, cliquez **"New +"** → **"Web Service"**
+
+3. Connectez votre repo GitHub
+
+4. Configurez:
+   - Name: `veille-lisnard-dashboard`
+   - Environment: **Python 3**
+   - Region: Frankfurt
+   - Branch: main
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `streamlit run dashboard_streamlit.py --server.port=$PORT --server.address=0.0.0.0`
+
+5. **Variables d'environnement** (section "Environment"):
+   - Cliquez **"Add Environment Variable"**
+   - Key: `DATABASE_URL`
+   - Value: Copiez l'URL de votre DB PostgreSQL (depuis l'onglet Connect de la DB)
+
+6. Cliquez **"Create Web Service"**
+
+7. **Attendez 5-10 minutes** le premier déploiement
+
+### Option B: Via Docker
+
+Si vous préférez Docker, créez un `Dockerfile`:
+
+```dockerfile
+FROM python:3.10-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY dashboard_streamlit.py .
+EXPOSE 8501
+CMD streamlit run dashboard_streamlit.py --server.port=$PORT --server.address=0.0.0.0
+```
+
+Puis sur Render:
+- New Web Service
+- Deploy from Docker
+- Suivez les mêmes étapes
+
+## ✅ ÉTAPE 4 : Accéder à votre Dashboard
+
+Une fois déployé, Render vous donne une URL publique:
+`https://veille-lisnard-dashboard.onrender.com`
+
+Le dashboard sera accessible 24/7 gratuitement (avec le tier Free).
+
+## 💡 CONSEILS
+
+### Performances Free Tier
+- Le service **s'endort après 15 min d'inactivité**
+- Premier chargement : 30-60 secondes (réveil)
+- Chargements suivants : rapides
+
+### Passer en Production
+Pour usage intensif, upgradez vers:
+- **Starter Plan**: 7$/mois
+- **Standard Plan**: 25$/mois
+- Avantages: Pas de sleep, plus de ressources
+
+### Ajouter la Collecte Twitter
+
+Pour automatiser la collecte, créez un **Background Worker**:
+
+1. New → **Background Worker**
+2. Même repo GitHub
+3. Start Command: `python twitter_collector_simple.py`
+4. Variables d'env: DATABASE_URL + TWITTER_BEARER_TOKEN
+
+## 🔒 SÉCURITÉ
+
+⚠️ **IMPORTANT:**
+- Ne commitez JAMAIS les credentials dans Git
+- Utilisez toujours les **Environment Variables** de Render
+- L'URL de DB interne est sécurisée (accessible uniquement par vos services Render)
+
+## 📊 MONITORING
+
+Dashboard Render → Logs en temps réel
+- Surveillez les erreurs
+- Vérifiez les connexions DB
+- Analysez les performances
+
+## 🆘 DÉPANNAGE
+
+### Erreur "Port already in use"
+→ Vérifiez que la Start Command utilise `$PORT`
+
+### Erreur de connexion DB
+→ Vérifiez que DATABASE_URL est bien configurée
+→ Testez la connexion dans le Web Shell
+
+### Dashboard ne charge pas
+→ Regardez les logs (Render Dashboard → Logs)
+→ Vérifiez requirements.txt
+
+## 🎯 RÉSULTAT FINAL
+
+✅ Dashboard public accessible 24/7
+✅ Base de données PostgreSQL sécurisée
+✅ 0€ pour commencer (Free tier)
+✅ Scalable à tout moment
+
+URL exemple: https://veille-lisnard-dashboard.onrender.com
+
+-- Script d'initialisation PostgreSQL pour Render
+-- Base de données : veille_lisnard
+
+CREATE TABLE IF NOT EXISTS tweets (
+    id SERIAL PRIMARY KEY,
+    tweet_id BIGINT UNIQUE NOT NULL,
+    text TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    author_username VARCHAR(255),
+    author_name VARCHAR(255),
+    author_followers INTEGER DEFAULT 0,
+    retweet_count INTEGER DEFAULT 0,
+    like_count INTEGER DEFAULT 0,
+    reply_count INTEGER DEFAULT 0,
+    sentiment VARCHAR(20),
+    sentiment_score FLOAT,
+    influence_score FLOAT,
+    collected_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS influencers (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255),
+    followers_count INTEGER DEFAULT 0,
+    total_mentions INTEGER DEFAULT 0,
+    avg_engagement FLOAT DEFAULT 0,
+    influence_score FLOAT DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id SERIAL PRIMARY KEY,
+    alert_type VARCHAR(50) NOT NULL,
+    severity VARCHAR(20) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    acknowledged BOOLEAN DEFAULT FALSE
+);
+
+CREATE INDEX idx_tweets_created ON tweets(created_at DESC);
+CREATE INDEX idx_tweets_username ON tweets(author_username);
+
+# Configuration Render pour Plateforme Veille David Lisnard
+services:
+  # Base de données PostgreSQL
+  - type: pserv
+    name: veille-lisnard-db
+    env: docker
+    plan: free
+    region: frankfurt
+    databases:
+      - name: veille_lisnard
+        user: veille_app
+
+  # Dashboard Streamlit
+  - type: web
+    name: veille-lisnard-dashboard
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run dashboard_streamlit.py --server.port=$PORT --server.address=0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10
+      - key: DATABASE_URL
+        fromDatabase:
+          name: veille-lisnard-db
+          property: connectionString
+      - key: TWITTER_BEARER_TOKEN
+        sync: false
+
+  # Worker de collecte (optionnel, version payante)
+  # - type: worker
+  #   name: veille-lisnard-worker
+  #   env: python
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: python twitter_collector.py
+
+streamlit==1.28.0
+psycopg2-binary==2.9.9
+pandas==2.1.0
+plotly==5.17.0
+python-dateutil==2.8.2
+
+
+# Je vais créer tous les fichiers nécessaires pour le déploiement Render
+
+print("🚀 CRÉATION DES FICHIERS POUR DÉPLOIEMENT RENDER")
+print("="*80)
+
+# 1. Script d'initialisation DB simplifié
+init_db_render = '''-- Script d'initialisation PostgreSQL pour Render
+-- Base de données : veille_lisnard
+
+CREATE TABLE IF NOT EXISTS tweets (
+    id SERIAL PRIMARY KEY,
+    tweet_id BIGINT UNIQUE NOT NULL,
+    text TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    author_username VARCHAR(255),
+    author_name VARCHAR(255),
+    author_followers INTEGER DEFAULT 0,
+    retweet_count INTEGER DEFAULT 0,
+    like_count INTEGER DEFAULT 0,
+    reply_count INTEGER DEFAULT 0,
+    sentiment VARCHAR(20),
+    sentiment_score FLOAT,
+    influence_score FLOAT,
+    collected_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS influencers (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255),
+    followers_count INTEGER DEFAULT 0,
+    total_mentions INTEGER DEFAULT 0,
+    avg_engagement FLOAT DEFAULT 0,
+    influence_score FLOAT DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id SERIAL PRIMARY KEY,
+    alert_type VARCHAR(50) NOT NULL,
+    severity VARCHAR(20) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    acknowledged BOOLEAN DEFAULT FALSE
+);
+
+CREATE INDEX idx_tweets_created ON tweets(created_at DESC);
+CREATE INDEX idx_tweets_username ON tweets(author_username);
+'''
+
+with open('init_db_render.sql', 'w', encoding='utf-8') as f:
+    f.write(init_db_render)
+print("✅ init_db_render.sql créé")
+
+# 2. Fichier render.yaml (configuration Infrastructure as Code)
+render_yaml = '''# Configuration Render pour Plateforme Veille David Lisnard
+services:
+  # Base de données PostgreSQL
+  - type: pserv
+    name: veille-lisnard-db
+    env: docker
+    plan: free
+    region: frankfurt
+    databases:
+      - name: veille_lisnard
+        user: veille_app
+
+  # Dashboard Streamlit
+  - type: web
+    name: veille-lisnard-dashboard
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run dashboard_streamlit.py --server.port=$PORT --server.address=0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10
+      - key: DATABASE_URL
+        fromDatabase:
+          name: veille-lisnard-db
+          property: connectionString
+      - key: TWITTER_BEARER_TOKEN
+        sync: false
+    
+  # Worker de collecte (optionnel, version payante)
+  # - type: worker
+  #   name: veille-lisnard-worker
+  #   env: python
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: python twitter_collector.py
+'''
+
+with open('render.yaml', 'w', encoding='utf-8') as f:
+    f.write(render_yaml)
+print("✅ render.yaml créé")
+
+# 3. Dashboard Streamlit simplifié pour Render
+dashboard_streamlit_simple = '''import streamlit as st
+import psycopg2
+import os
+import pandas as pd
+from datetime import datetime, timedelta
+import plotly.express as px
+import plotly.graph_objects as go
+
+# Configuration de la page
+st.set_page_config(
+    page_title="Veille David Lisnard",
+    page_icon="📊",
+    layout="wide"
+)
+
+# Connexion à la base de données
+@st.cache_resource
+def get_db_connection():
+    """Connexion à PostgreSQL sur Render"""
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        # Render fournit l'URL complète
+        return psycopg2.connect(database_url)
+    else:
+        # Fallback pour développement local
+        return None
+
+# CSS personnalisé
+st.markdown("""
+<style>
+    .main {background-color: #f9fafb;}
+    h1 {color: #1e3a8a; font-weight: 700;}
+    .stMetric {background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);}
+</style>
+""", unsafe_allow_html=True)
+
+# Header
+st.title("📊 Plateforme de Veille Stratégique")
+st.subheader("David Lisnard - Analyse en Temps Réel")
+st.markdown(f"**Dernière mise à jour:** {datetime.now().strftime('%d/%m/%Y à %H:%M')}")
+
+# Connexion DB
+conn = get_db_connection()
+
+if conn is None:
+    st.warning("⚠️ Mode démonstration - Connectez la base de données PostgreSQL")
+    
+    # Données de démonstration
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("📈 Mentions", "1,247", "+23%")
+    with col2:
+        st.metric("😊 Sentiment", "+0.42", "+0.08")
+    with col3:
+        st.metric("💬 Engagement", "287", "+15%")
+    with col4:
+        st.metric("👥 Influenceurs", "156", "+8")
+    
+    st.info("💡 Pour activer les vraies données, configurez DATABASE_URL dans les variables d'environnement Render")
+    
+else:
+    try:
+        cursor = conn.cursor()
+        
+        # Requête : Statistiques globales
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total,
+                COUNT(DISTINCT author_username) as unique_authors,
+                AVG(CASE 
+                    WHEN sentiment = 'positive' THEN 1.0
+                    WHEN sentiment = 'neutral' THEN 0.0
+                    WHEN sentiment = 'negative' THEN -1.0
+                END) as avg_sentiment,
+                AVG(like_count + retweet_count) as avg_engagement
+            FROM tweets
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+        """)
+        stats = cursor.fetchone()
+        
+        # Affichage des métriques
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("📈 Mentions (7j)", f"{stats[0]:,}" if stats[0] else "0")
+        with col2:
+            st.metric("😊 Sentiment", f"{stats[2]:.2f}" if stats[2] else "0.00")
+        with col3:
+            st.metric("💬 Engagement Moy", f"{int(stats[3])}" if stats[3] else "0")
+        with col4:
+            st.metric("👥 Auteurs Uniques", f"{stats[1]}" if stats[1] else "0")
+        
+        st.markdown("---")
+        
+        # Graphiques
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            st.subheader("📊 Évolution Temporelle")
+            
+            cursor.execute("""
+                SELECT DATE(created_at) as date, COUNT(*) as count
+                FROM tweets
+                WHERE created_at >= NOW() - INTERVAL '7 days'
+                GROUP BY DATE(created_at)
+                ORDER BY date
+            """)
+            timeline_data = cursor.fetchall()
+            
+            if timeline_data:
+                df_timeline = pd.DataFrame(timeline_data, columns=['Date', 'Mentions'])
+                fig_timeline = px.line(df_timeline, x='Date', y='Mentions', 
+                                      markers=True, line_shape='spline')
+                fig_timeline.update_layout(height=350)
+                st.plotly_chart(fig_timeline, use_container_width=True)
+            else:
+                st.info("Aucune donnée disponible")
+        
+        with col_right:
+            st.subheader("😊 Répartition des Sentiments")
+            
+            cursor.execute("""
+                SELECT sentiment, COUNT(*) as count
+                FROM tweets
+                WHERE sentiment IS NOT NULL
+                GROUP BY sentiment
+            """)
+            sentiment_data = cursor.fetchall()
+            
+            if sentiment_data:
+                df_sentiment = pd.DataFrame(sentiment_data, columns=['Sentiment', 'Count'])
+                fig_sentiment = px.pie(df_sentiment, values='Count', names='Sentiment',
+                                      color='Sentiment',
+                                      color_discrete_map={
+                                          'positive': '#10B981',
+                                          'neutral': '#6B7280',
+                                          'negative': '#EF4444'
+                                      })
+                fig_sentiment.update_layout(height=350)
+                st.plotly_chart(fig_sentiment, use_container_width=True)
+            else:
+                st.info("Aucune donnée de sentiment disponible")
+        
+        st.markdown("---")
+        
+        # Top Influenceurs
+        st.subheader("🌟 Top Influenceurs")
+        
+        cursor.execute("""
+            SELECT 
+                author_username,
+                COUNT(*) as mentions,
+                AVG(like_count + retweet_count) as avg_engagement,
+                MAX(author_followers) as followers
+            FROM tweets
+            WHERE author_username IS NOT NULL
+            GROUP BY author_username
+            ORDER BY mentions DESC, avg_engagement DESC
+            LIMIT 10
+        """)
+        
+        influencers = cursor.fetchall()
+        
+        if influencers:
+            df_influencers = pd.DataFrame(influencers, 
+                                         columns=['Compte', 'Mentions', 'Engagement Moy', 'Followers'])
+            st.dataframe(df_influencers, use_container_width=True, hide_index=True)
+        else:
+            st.info("Aucun influenceur détecté")
+        
+        cursor.close()
+        
+    except Exception as e:
+        st.error(f"Erreur base de données: {e}")
+        st.info("La base de données est peut-être vide. Lancez d'abord le script de collecte.")
+
+# Footer
+st.markdown("---")
+st.markdown("**© 2025 Veille Stratégique David Lisnard** | Propulsé par Streamlit & PostgreSQL")
+'''
+
+with open('dashboard_streamlit.py', 'w', encoding='utf-8') as f:
+    f.write(dashboard_streamlit_simple)
+print("✅ dashboard_streamlit.py créé")
+
+# 4. Requirements simplifiés pour Render
+requirements_render = '''streamlit==1.28.0
+psycopg2-binary==2.9.9
+pandas==2.1.0
+plotly==5.17.0
+python-dateutil==2.8.2
+'''
+
+with open('requirements_render.txt', 'w', encoding='utf-8') as f:
+    f.write(requirements_render)
+print("✅ requirements_render.txt créé")
+
+# 5. Guide de déploiement Render
+guide_render = '''# 🚀 GUIDE DE DÉPLOIEMENT RENDER - ÉTAPE PAR ÉTAPE
+
+## ✅ ÉTAPE 1 : Créer la Base de Données PostgreSQL
+
+1. Sur dashboard.render.com, cliquez **"New +"** en haut à droite
+2. Sélectionnez **"PostgreSQL"**
+3. Configurez:
+   - Name: `veille-lisnard-db`
+   - Database: `veille_lisnard`  
+   - User: `veille_app`
+   - Region: **Frankfurt** (Europe)
+   - PostgreSQL Version: 15
+   - Plan: **Free** (pour commencer)
+4. Cliquez **"Create Database"**
+5. **Attendez 2-3 minutes** que la DB soit créée
+
+## ✅ ÉTAPE 2 : Initialiser les Tables
+
+1. Une fois la DB créée, allez dans l'onglet **"Connect"**
+2. Copiez la **"Internal Database URL"**
+3. Cliquez sur **"Web Shell"** (ou utilisez psql localement)
+4. Exécutez le script `init_db_render.sql`:
+
+```bash
+# Dans le Web Shell Render
+psql $DATABASE_URL < init_db_render.sql
+```
+
+OU copiez/collez le contenu du fichier directement dans le shell.
+
+## ✅ ÉTAPE 3 : Déployer le Dashboard Streamlit
+
+### Option A: Via GitHub (Recommandé)
+
+1. Créez un repo GitHub avec ces fichiers:
+   - dashboard_streamlit.py
+   - requirements_render.txt (renommez en requirements.txt)
+   - init_db_render.sql
+
+2. Sur Render, cliquez **"New +"** → **"Web Service"**
+
+3. Connectez votre repo GitHub
+
+4. Configurez:
+   - Name: `veille-lisnard-dashboard`
+   - Environment: **Python 3**
+   - Region: Frankfurt
+   - Branch: main
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `streamlit run dashboard_streamlit.py --server.port=$PORT --server.address=0.0.0.0`
+
+5. **Variables d'environnement** (section "Environment"):
+   - Cliquez **"Add Environment Variable"**
+   - Key: `DATABASE_URL`
+   - Value: Copiez l'URL de votre DB PostgreSQL (depuis l'onglet Connect de la DB)
+   
+6. Cliquez **"Create Web Service"**
+
+7. **Attendez 5-10 minutes** le premier déploiement
+
+### Option B: Via Docker
+
+Si vous préférez Docker, créez un `Dockerfile`:
+
+```dockerfile
+FROM python:3.10-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY dashboard_streamlit.py .
+EXPOSE 8501
+CMD streamlit run dashboard_streamlit.py --server.port=$PORT --server.address=0.0.0.0
+```
+
+Puis sur Render:
+- New Web Service
+- Deploy from Docker
+- Suivez les mêmes étapes
+
+## ✅ ÉTAPE 4 : Accéder à votre Dashboard
+
+Une fois déployé, Render vous donne une URL publique:
+`https://veille-lisnard-dashboard.onrender.com`
+
+Le dashboard sera accessible 24/7 gratuitement (avec le tier Free).
+
+## 💡 CONSEILS
+
+### Performances Free Tier
+- Le service **s'endort après 15 min d'inactivité**
+- Premier chargement : 30-60 secondes (réveil)
+- Chargements suivants : rapides
+
+### Passer en Production
+Pour usage intensif, upgradez vers:
+- **Starter Plan**: 7$/mois
+- **Standard Plan**: 25$/mois
+- Avantages: Pas de sleep, plus de ressources
+
+### Ajouter la Collecte Twitter
+
+Pour automatiser la collecte, créez un **Background Worker**:
+
+1. New → **Background Worker**
+2. Même repo GitHub
+3. Start Command: `python twitter_collector_simple.py`
+4. Variables d'env: DATABASE_URL + TWITTER_BEARER_TOKEN
+
+## 🔒 SÉCURITÉ
+
+⚠️ **IMPORTANT:**
+- Ne commitez JAMAIS les credentials dans Git
+- Utilisez toujours les **Environment Variables** de Render
+- L'URL de DB interne est sécurisée (accessible uniquement par vos services Render)
+
+## 📊 MONITORING
+
+Dashboard Render → Logs en temps réel
+- Surveillez les erreurs
+- Vérifiez les connexions DB
+- Analysez les performances
+
+## 🆘 DÉPANNAGE
+
+### Erreur "Port already in use"
+→ Vérifiez que la Start Command utilise `$PORT`
+
+### Erreur de connexion DB
+→ Vérifiez que DATABASE_URL est bien configurée
+→ Testez la connexion dans le Web Shell
+
+### Dashboard ne charge pas
+→ Regardez les logs (Render Dashboard → Logs)
+→ Vérifiez requirements.txt
+
+## 🎯 RÉSULTAT FINAL
+
+✅ Dashboard public accessible 24/7
+✅ Base de données PostgreSQL sécurisée
+✅ 0€ pour commencer (Free tier)
+✅ Scalable à tout moment
+
+URL exemple: https://veille-lisnard-dashboard.onrender.com
+'''
+
+with open('GUIDE_RENDER.md', 'w', encoding='utf-8') as f:
+    f.write(guide_render)
+print("✅ GUIDE_RENDER.md créé")
+
+print("\n" + "="*80)
+print("✅ TOUS LES FICHIERS RENDER SONT PRÊTS!")
+print("="*80)
+print("\n📥 Fichiers créés:")
+print("   1. init_db_render.sql        - Script d'initialisation DB")
+print("   2. dashboard_streamlit.py    - Dashboard Streamlit optimisé Render")
+print("   3. requirements_render.txt   - Dépendances Python minimales")
+print("   4. render.yaml               - Configuration Infrastructure as Code")
+print("   5. GUIDE_RENDER.md           - Guide complet étape par étape")
+
+print("\n🚀 PROCHAINES ÉTAPES:")
+print("="*80)
+print("""
+1. ✅ Téléchargez ces 5 fichiers
+2. 📤 Créez un repo GitHub et uploadez-les
+3. 🔗 Connectez le repo à Render
+4. 🗄️ Créez la base PostgreSQL
+5. 🌐 Déployez le Web Service
+6. 🎉 Accédez à votre dashboard en ligne!
+
+Lisez GUIDE_RENDER.md pour les détails complets.
+""")
